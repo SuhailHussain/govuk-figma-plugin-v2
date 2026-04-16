@@ -60,9 +60,11 @@ async function scrape(request) {
   const spacingStack = [];
   const contextStack = [];
   const seenStructural = new Set();
-  let skipDepth   = 0; // inside a fully-ignored container
-  let structDepth = 0; // inside a structural component (children skipped)
-  let columnDepth = 0; // inside a grid column (content capture zone)
+  let skipDepth      = 0;    // inside a fully-ignored container
+  let structDepth    = 0;    // inside a structural component (children skipped)
+  let columnDepth    = 0;    // inside a grid column (content capture zone)
+  let govspeakMarker = null; // active govspeak component marker
+  let govspeakBuf    = '';   // accumulated inner HTML for active govspeak block
 
   await new HTMLRewriter()
     .on('[class]', {
@@ -118,6 +120,24 @@ async function scrape(request) {
         // ── Only capture elements inside a grid column ────────
         if (columnDepth === 0) return;
 
+        // ── Govspeak content block ────────────────────────────
+        // Detect the govspeak wrapper: mark its position in the component list,
+        // then collect its inner structure via the dedicated handlers below.
+        // Children are skipped from the regular class scanner.
+        if (classList.includes('gem-c-govspeak') || classList.includes('govuk-govspeak')) {
+          const gridColumn = contextStack.length > 0 ? contextStack[contextStack.length - 1] : null;
+          govspeakMarker = { isGovspeak: true, govspeakHtml: '', gridColumn, marginBottom: null };
+          govspeakBuf    = '';
+          components.push(govspeakMarker);
+          el.onEndTag(() => {
+            govspeakMarker.govspeakHtml = govspeakBuf;
+            govspeakMarker = null;
+            govspeakBuf    = '';
+          });
+          return;
+        }
+        if (govspeakMarker) return; // children handled by structural element handlers below
+
         // ── Spacing context ───────────────────────────────────
         let ownMargin = null;
         classList.forEach(c => {
@@ -140,6 +160,28 @@ async function scrape(request) {
         if (candidates.length) {
           components.push({ candidates, gridColumn, marginBottom });
         }
+      }
+    })
+    // ── Govspeak: list/table containers (structure only, no text) ─
+    .on('ul, ol, table', {
+      element(el) {
+        if (!govspeakMarker) return;
+        const tag = el.tagName;
+        govspeakBuf += `<${tag}>`;
+        el.onEndTag(() => { govspeakBuf += `</${tag}>`; });
+      }
+    })
+    // ── Govspeak: content elements (structure + text) ─────────────
+    .on('p, h1, h2, h3, h4, h5, h6, li, blockquote', {
+      element(el) {
+        if (!govspeakMarker) return;
+        const tag = el.tagName;
+        govspeakBuf += `<${tag}>`;
+        el.onEndTag(() => { govspeakBuf += `</${tag}>`; });
+      },
+      text(chunk) {
+        if (!govspeakMarker) return;
+        govspeakBuf += chunk.text;
       }
     })
     .transform(govukResp)

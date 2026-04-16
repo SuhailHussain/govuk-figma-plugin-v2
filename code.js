@@ -735,9 +735,25 @@ figma.ui.onmessage = async function (msg) {
     ]);
 
     var matchedComponents = [];
-    rawComponents.forEach(function (item) {
+    for (var i = 0; i < rawComponents.length; i++) {
+      var item = rawComponents[i];
+
+      // Govspeak block: ask Claude to map the inner content to GOV.UK components
+      if (item.isGovspeak) {
+        if (item.govspeakHtml && item.govspeakHtml.trim()) {
+          figma.ui.postMessage({ type: 'status', message: 'Analysing page content…' });
+          var govspeakClasses = await mapGovspeakToComponents(item.govspeakHtml, apiKey);
+          govspeakClasses.forEach(function (cls) {
+            if (COMPONENT_MAP[cls] && !EXCLUDE_CLASSES.has(cls)) {
+              matchedComponents.push({ class: cls, gridColumn: item.gridColumn, marginBottom: null });
+            }
+          });
+        }
+        continue;
+      }
+
+      // Regular element: resolve to first matching COMPONENT_MAP entry
       // Prefer BEM modifier classes (e.g. .govuk-button--secondary) over base classes
-      // so the HTML markup is the source of truth when two components look similar.
       var sortedCandidates = item.candidates.slice().sort(function (a, b) {
         var aIsMod = a.includes('--'), bIsMod = b.includes('--');
         if (aIsMod && !bIsMod) return -1;
@@ -746,7 +762,7 @@ figma.ui.onmessage = async function (msg) {
       });
       var resolved = sortedCandidates.find(function (c) { return COMPONENT_MAP[c] && !EXCLUDE_CLASSES.has(c); });
       if (resolved) matchedComponents.push({ class: resolved, gridColumn: item.gridColumn, marginBottom: item.marginBottom });
-    });
+    }
     console.log('[cherry] matched to component map:', matchedComponents);
 
     if (!matchedComponents.length) throw new Error('No recognised components found on this page. Check the URL and try again.');
@@ -780,6 +796,63 @@ async function scrapeClasses(url) {
   var data = await resp.json();
   if (data.error) throw new Error('Worker error: ' + data.error);
   return Array.isArray(data.components) ? data.components : [];
+}
+
+// ── GOVSPEAK → COMPONENTS ─────────────────────────────────────
+// Sends the inner HTML of a govspeak block to Claude and gets back
+// an ordered list of GOV.UK component classes that best represent it.
+async function mapGovspeakToComponents(govspeakHtml, apiKey) {
+  var contentClasses = [
+    '.govuk-heading-xl', '.govuk-heading-l', '.govuk-heading-m', '.govuk-heading-s',
+    '.govuk-body', '.govuk-body-l', '.govuk-body-s',
+    '.govuk-list',
+    '.govuk-inset-text',
+    '.govuk-warning-text',
+    '.govuk-details',
+    '.govuk-table',
+    '.govuk-button', '.govuk-button--start',
+    '.govuk-panel',
+    '.govuk-summary-list',
+    '.govuk-notification-banner', '.govuk-notification-banner--success',
+    '.govuk-accordion'
+  ].filter(function (c) { return !!COMPONENT_MAP[c]; });
+
+  var prompt =
+    'Below is the HTML from the main content area of a GOV.UK page:\n\n' +
+    govspeakHtml + '\n\n' +
+    'Choose the GOV.UK Figma components that a designer would use to recreate this content. ' +
+    'Pick only from this list:\n' + contentClasses.join('\n') + '\n\n' +
+    'Guidelines:\n' +
+    '- h1–h6 → matching .govuk-heading-* size (h1=xl, h2=l, h3=m, h4=s)\n' +
+    '- <p> → .govuk-body\n' +
+    '- <ul> or <ol> → .govuk-list\n' +
+    '- <blockquote> or advisory content → .govuk-inset-text or .govuk-warning-text based on tone\n' +
+    '- Include every significant content block, in document order\n' +
+    'Return ONLY a valid JSON array of CSS class strings. No markdown, no explanation.';
+
+  var body = JSON.stringify({
+    model: 'claude-haiku-4-5-20251001',
+    max_tokens: 512,
+    messages: [{ role: 'user', content: prompt }]
+  });
+
+  try {
+    var resp = await fetch(WORKER_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+      body: body
+    });
+    if (!resp.ok) return [];
+    var data = await resp.json();
+    if (data.error) return [];
+    var text = (data.content && data.content[0] && data.content[0].text) || '';
+    text = text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
+    var classes = JSON.parse(text);
+    return Array.isArray(classes) ? classes : [];
+  } catch (e) {
+    console.warn('[govspeak] mapping failed:', e.message);
+    return [];
+  }
 }
 
 // ── SCREENSHOT + VISION ───────────────────────────────────────
