@@ -27,6 +27,23 @@ async function scrape(request) {
     '.govuk-grid-column-one-third-from-desktop'
   ]);
 
+  // Page-level structural components: captured once as a unit, children not scanned.
+  // These live outside the grid content area and are always full-width.
+  const STRUCTURAL_CLASSES = new Set([
+    'gem-c-layout-super-navigation-header',
+    'gem-c-layout-header',
+    'gem-c-cross-service-header',
+    'govuk-header',
+    'govuk-phase-banner',
+    'govuk-service-navigation',
+    'govuk-breadcrumbs',
+    'govuk-footer',
+    'gem-c-feedback'
+  ]);
+
+  // Fully ignored zones — self and all children skipped (not visible on initial load)
+  const SKIP_CONTAINERS = new Set(['govuk-cookie-banner']);
+
   const govukResp = await fetch(pageUrl, {
     headers: {
       'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
@@ -39,21 +56,20 @@ async function scrape(request) {
     return json({ error: 'Failed to fetch page: HTTP ' + govukResp.status }, 502);
   }
 
-  const contextStack = [];
+  const components   = [];
   const spacingStack = [];
-  const components = [];
-  const seen = new Set();
-
-  // Elements whose entire subtree should be ignored (not visible on initial load)
-  const SKIP_CONTAINERS = new Set(['govuk-cookie-banner']);
-  let skipDepth = 0;
+  const contextStack = [];
+  const seenStructural = new Set();
+  let skipDepth   = 0; // inside a fully-ignored container
+  let structDepth = 0; // inside a structural component (children skipped)
+  let columnDepth = 0; // inside a grid column (content capture zone)
 
   await new HTMLRewriter()
     .on('[class]', {
       element(el) {
         const classList = (el.getAttribute('class') || '').split(/\s+/);
 
-        // Enter a skip zone — ignore this element and all its descendants
+        // ── Fully ignored zones ───────────────────────────────
         if (classList.some(c => SKIP_CONTAINERS.has(c))) {
           skipDepth++;
           el.onEndTag(() => { skipDepth--; });
@@ -61,29 +77,48 @@ async function scrape(request) {
         }
         if (skipDepth > 0) return;
 
-        // Skip hidden elements
-        const hiddenAttr = el.getAttribute('hidden');
+        // ── Hidden elements ───────────────────────────────────
         const isHidden =
-          hiddenAttr !== null ||
-          hiddenAttr === 'hidden' ||
+          el.getAttribute('hidden') !== null ||
           el.getAttribute('aria-hidden') === 'true' ||
           classList.includes('govuk-visually-hidden') ||
           classList.includes('js-hidden') ||
           classList.includes('hidden');
         if (isHidden) return;
 
-        // Track grid column context via a stack
+        // ── Structural components ─────────────────────────────
+        // Capture the component itself once, then skip all its children.
+        if (structDepth === 0) {
+          const structClass = classList.find(c => STRUCTURAL_CLASSES.has(c));
+          if (structClass && !seenStructural.has(structClass)) {
+            seenStructural.add(structClass);
+            components.push({ candidates: ['.' + structClass], gridColumn: null, marginBottom: null });
+            structDepth++;
+            el.onEndTag(() => { structDepth--; });
+            return;
+          }
+        }
+        if (structDepth > 0) return;
+
+        // ── Grid column context ───────────────────────────────
+        // Track which column we're in; the column element itself is not a component.
         const gridClass = classList.find(c => GRID_COLUMNS.has('.' + c));
         if (gridClass) {
           const dotClass = '.' + gridClass;
           contextStack.push(dotClass);
+          columnDepth++;
           el.onEndTag(() => {
+            columnDepth--;
             const idx = contextStack.lastIndexOf(dotClass);
             if (idx !== -1) contextStack.splice(idx, 1);
           });
+          return;
         }
 
-        // Track margin-bottom spacing context via a stack (handles parent wrappers)
+        // ── Only capture elements inside a grid column ────────
+        if (columnDepth === 0) return;
+
+        // ── Spacing context ───────────────────────────────────
         let ownMargin = null;
         classList.forEach(c => {
           let m = c.match(/^govuk-!-margin-bottom-(\d)$/);
@@ -96,15 +131,13 @@ async function scrape(request) {
           el.onEndTag(() => { spacingStack.pop(); });
         }
 
-        // Collect candidates per element — gem-c-* first, then govuk-* as fallback
-        // The plugin picks whichever candidate exists in its COMPONENT_MAP
+        // ── Emit component candidates ─────────────────────────
         const gridColumn   = contextStack.length > 0 ? contextStack[contextStack.length - 1] : null;
         const marginBottom = ownMargin || (spacingStack.length > 0 ? spacingStack[spacingStack.length - 1] : null);
-        const gemClasses   = classList.filter(c => c.startsWith('gem-c-') && !seen.has('.' + c));
-        const govukClasses = classList.filter(c => c.startsWith('govuk-') && !seen.has('.' + c));
+        const gemClasses   = classList.filter(c => c.startsWith('gem-c-'));
+        const govukClasses = classList.filter(c => c.startsWith('govuk-'));
         const candidates   = [...gemClasses, ...govukClasses].map(c => '.' + c);
         if (candidates.length) {
-          candidates.forEach(c => seen.add(c));
           components.push({ candidates, gridColumn, marginBottom });
         }
       }
