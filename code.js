@@ -814,7 +814,11 @@ async function mapGovspeakToComponents(govspeakHtml, apiKey) {
     '.govuk-panel',
     '.govuk-summary-list',
     '.govuk-notification-banner', '.govuk-notification-banner--success',
-    '.govuk-accordion'
+    '.govuk-accordion',
+    '.gem-c-document-list',
+    '.gem-c-attachment',
+    '.gem-c-cards',
+    '.gem-c-contents-list'
   ].filter(function (c) { return !!COMPONENT_MAP[c]; });
 
   var prompt =
@@ -825,8 +829,12 @@ async function mapGovspeakToComponents(govspeakHtml, apiKey) {
     'Guidelines:\n' +
     '- h1–h6 → matching .govuk-heading-* size (h1=xl, h2=l, h3=m, h4=s)\n' +
     '- <p> → .govuk-body\n' +
-    '- <ul> or <ol> → .govuk-list\n' +
+    '- <ul> or <ol> with gem-c-document-list class → .gem-c-document-list\n' +
+    '- plain <ul> or <ol> → .govuk-list\n' +
     '- <blockquote> or advisory content → .govuk-inset-text or .govuk-warning-text based on tone\n' +
+    '- file/document attachment blocks → .gem-c-attachment\n' +
+    '- card grids → .gem-c-cards\n' +
+    '- table of contents / contents list → .gem-c-contents-list\n' +
     '- Include every significant content block, in document order\n' +
     'Return ONLY a valid JSON array of CSS class strings. No markdown, no explanation.';
 
@@ -945,13 +953,24 @@ async function orderWithVision(matchedComponents, screenshot, apiKey) {
 
   if (!Array.isArray(orderedClasses) || orderedClasses.length === 0) return matchedComponents;
 
-  // Remap to original items to preserve gridColumn/marginBottom context
-  var classToItem = {};
-  matchedComponents.forEach(function (item) { classToItem[item.class] = item; });
+  // Remap to original items to preserve gridColumn/marginBottom context.
+  // Use an array-map so multiple instances of the same class are all preserved.
+  var classToItems = {};
+  matchedComponents.forEach(function (item) {
+    if (!classToItems[item.class]) classToItems[item.class] = [];
+    classToItems[item.class].push(item);
+  });
 
+  var classUsage = {};
   var result = [];
   orderedClasses.forEach(function (cls) {
-    if (classToItem[cls]) result.push(classToItem[cls]);
+    var pool = classToItems[cls];
+    if (!pool) return;
+    var idx = classUsage[cls] || 0;
+    if (idx < pool.length) {
+      result.push(pool[idx]);
+      classUsage[cls] = idx + 1;
+    }
   });
 
   return result.length > 0 ? result : matchedComponents;

@@ -136,7 +136,16 @@ async function scrape(request) {
           });
           return;
         }
-        if (govspeakMarker) return; // children handled by structural element handlers below
+        if (govspeakMarker) {
+          // Still emit gem-c-* publishing components found inside govspeak blocks —
+          // they are real components (e.g. gem-c-document-list) not prose content.
+          const gemClasses = classList.filter(c => c.startsWith('gem-c-'));
+          if (gemClasses.length) {
+            const gridColumn = contextStack.length > 0 ? contextStack[contextStack.length - 1] : null;
+            components.push({ candidates: gemClasses.map(c => '.' + c), gridColumn, marginBottom: null });
+          }
+          return;
+        }
 
         // ── Spacing context ───────────────────────────────────
         let ownMargin = null;
